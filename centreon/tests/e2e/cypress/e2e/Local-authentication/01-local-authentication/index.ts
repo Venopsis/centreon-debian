@@ -468,7 +468,7 @@ Then('the user is locked after reaching the number of allowed attempts', () => {
     preserveToken: false
   })
     .get('.SnackbarContent-root > .MuiPaper-root')
-    .contains('User is blocked');
+    .contains('Authentication failed');
 
   cy.reload();
 });
