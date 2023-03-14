@@ -15535,3 +15535,9 @@ msgstr "No ha guardado los cambios, ¿quiere continuar?"
 
 #  msgid "Monitoring server disabled (#%d)"
 #  msgstr ""
+
+#  msgid "Error when searching for the host category #%d"
+#  msgstr ""
+
+#  msgid "Error while retrieving a host category"
+#  msgstr ""
