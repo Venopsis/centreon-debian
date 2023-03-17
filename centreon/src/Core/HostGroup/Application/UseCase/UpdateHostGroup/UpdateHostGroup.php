@@ -21,7 +21,7 @@
 
 declare(strict_types=1);
 
-namespace Core\HostGroup\Application\UseCase\AddHostGroup;
+namespace Core\HostGroup\Application\UseCase\UpdateHostGroup;
 
 use Assert\AssertionFailedException;
 use Centreon\Domain\Contact\Contact;
@@ -29,10 +29,11 @@ use Centreon\Domain\Contact\Interfaces\ContactInterface;
 use Centreon\Domain\Log\LoggerTrait;
 use Centreon\Domain\Repository\Interfaces\DataStorageEngineInterface;
 use Core\Application\Common\UseCase\ConflictResponse;
-use Core\Application\Common\UseCase\CreatedResponse;
 use Core\Application\Common\UseCase\ErrorResponse;
 use Core\Application\Common\UseCase\ForbiddenResponse;
 use Core\Application\Common\UseCase\InvalidArgumentResponse;
+use Core\Application\Common\UseCase\NoContentResponse;
+use Core\Application\Common\UseCase\NotFoundResponse;
 use Core\Application\Common\UseCase\PresenterInterface;
 use Core\Domain\Common\GeoCoords;
 use Core\Domain\Exception\InvalidGeoCoordException;
@@ -40,14 +41,12 @@ use Core\HostGroup\Application\Exceptions\HostGroupException;
 use Core\HostGroup\Application\Repository\ReadHostGroupRepositoryInterface;
 use Core\HostGroup\Application\Repository\WriteHostGroupRepositoryInterface;
 use Core\HostGroup\Domain\Model\HostGroup;
-use Core\HostGroup\Domain\Model\NewHostGroup;
-use Core\HostGroup\Infrastructure\API\AddHostGroup\AddHostGroupPresenterOnPrem;
-use Core\HostGroup\Infrastructure\API\AddHostGroup\AddHostGroupPresenterSaas;
+use Core\Infrastructure\Common\Api\DefaultPresenter;
 use Core\Security\AccessGroup\Application\Repository\ReadAccessGroupRepositoryInterface;
 use Core\Security\AccessGroup\Application\Repository\WriteAccessGroupRepositoryInterface;
 use Core\ViewImg\Application\Repository\ReadViewImgRepositoryInterface;
 
-final class AddHostGroup
+final class UpdateHostGroup
 {
     use LoggerTrait;
 
@@ -55,31 +54,45 @@ final class AddHostGroup
         private readonly ReadHostGroupRepositoryInterface $readHostGroupRepository,
         private readonly WriteHostGroupRepositoryInterface $writeHostGroupRepository,
         private readonly ReadAccessGroupRepositoryInterface $readAccessGroupRepository,
-        private readonly WriteAccessGroupRepositoryInterface $writeAccessGroupRepository,
         private readonly ReadViewImgRepositoryInterface $readViewImgRepository,
-        private readonly DataStorageEngineInterface $dataStorageEngine,
         private readonly ContactInterface $contact
     ) {
     }
 
     /**
-     * @param AddHostGroupRequest $request
-     * @param AddHostGroupPresenterOnPrem|AddHostGroupPresenterSaas $presenter
+     * @param int $hostGroupId
+     * @param UpdateHostGroupRequest $request
+     * @param DefaultPresenter $presenter
      */
     public function __invoke(
-        AddHostGroupRequest $request,
+        int $hostGroupId,
+        UpdateHostGroupRequest $request,
         PresenterInterface $presenter
     ): void {
         try {
             if ($this->contact->isAdmin()) {
-                $presenter->present($this->addHostGroupAsAdmin($request));
-                $this->info('Add host group', ['request' => $request]);
+                $response = $this->updateHostGroupAsAdmin($hostGroupId, $request);
+
+                if ($response instanceof NotFoundResponse) {
+                    $presenter->setResponseStatus($response);
+                    $this->warning('Host group (%s) not found', ['id' => $hostGroupId]);
+                } else {
+                    $presenter->present($response);
+                    $this->info('Update host group', ['request' => $request]);
+                }
             } elseif ($this->contactCanPerformWriteOperations()) {
-                $presenter->present($this->addHostGroupAsContact($request));
-                $this->info('Add host group', ['request' => $request]);
+                $response = $this->updateHostGroupAsContact($hostGroupId, $request);
+
+                if ($response instanceof NotFoundResponse) {
+                    $presenter->setResponseStatus($response);
+                    $this->warning('Host group (%s) not found', ['id' => $hostGroupId]);
+                } else {
+                    $presenter->present($response);
+                    $this->info('Update host group', ['request' => $request]);
+                }
             } else {
                 $this->error(
-                    "User doesn't have sufficient rights to add host groups",
+                    "User doesn't have sufficient rights to update host groups",
                     ['user_id' => $this->contact->getId()]
                 );
                 $presenter->setResponseStatus(
@@ -98,85 +111,79 @@ final class AddHostGroup
             );
             $this->error($ex->getMessage(), ['trace' => $ex->getTraceAsString()]);
         } catch (\Throwable $ex) {
-            $presenter->setResponseStatus(new ErrorResponse(HostGroupException::errorWhileAdding()));
+            $presenter->setResponseStatus(new ErrorResponse(HostGroupException::errorWhileUpdating()));
             $this->error($ex->getMessage(), ['trace' => $ex->getTraceAsString()]);
         }
     }
 
     /**
-     * @param AddHostGroupRequest $request
+     * @param UpdateHostGroupRequest $request
+     * @param int $hostGroupId
      *
-     * @throws HostGroupException
      * @throws \Throwable
-     *
-     * @return CreatedResponse<AddHostGroupResponse>
-     */
-    private function addHostGroupAsAdmin(AddHostGroupRequest $request): CreatedResponse
-    {
-        $this->assertNameDoesNotAlreadyExists($request);
-        $this->assertNotNullIconsExist($request);
-
-        $newHostGroup = $this->createNewHostGroup($request);
-        $newHostGroupId = $this->writeHostGroupRepository->add($newHostGroup);
-        $hostGroup = $this->readHostGroupRepository->findOne($newHostGroupId)
-            ?? throw HostGroupException::errorWhileRetrievingJustCreated();
-
-        return $this->createResponse($hostGroup);
-    }
-
-    /**
-     * @param AddHostGroupRequest $request
-     *
      * @throws HostGroupException
-     * @throws \Throwable
      *
-     * @return CreatedResponse<AddHostGroupResponse>
+     * @return NoContentResponse|NotFoundResponse
      */
-    private function addHostGroupAsContact(AddHostGroupRequest $request): CreatedResponse
-    {
-        $this->assertNameDoesNotAlreadyExists($request);
-        $this->assertNotNullIconsExist($request);
-
-        $accessGroups = $this->readAccessGroupRepository->findByContact($this->contact);
-        $newHostGroup = $this->createNewHostGroup($request);
-
-        try {
-            // As a contact, we must run into ONE transaction TWO operations.
-            $this->dataStorageEngine->startTransaction();
-
-            // 1. Add the host group.
-            $newHostGroupId = $this->writeHostGroupRepository->add($newHostGroup);
-
-            // 2. Create all related ACL links to be able to retrieve it later.
-            $this->writeAccessGroupRepository->addLinksBetweenHostGroupAndAccessGroups(
-                $newHostGroupId,
-                $accessGroups
-            );
-
-            $this->dataStorageEngine->commitTransaction();
-        } catch (\Throwable $ex) {
-            $this->error("Rollback of 'Add Host Group' transaction for a contact.");
-            $this->dataStorageEngine->rollbackTransaction();
-
-            throw $ex;
+    private function updateHostGroupAsAdmin(
+        int $hostGroupId,
+        UpdateHostGroupRequest $request
+    ): NoContentResponse|NotFoundResponse {
+        $hostGroup = $this->readHostGroupRepository->findOne($hostGroupId);
+        if (null === $hostGroup) {
+            return new NotFoundResponse('Host group');
         }
 
-        // Retrieve the Host Group for the response.
-        $hostGroup = $this->readHostGroupRepository->findOneByAccessGroups($newHostGroupId, $accessGroups)
-            ?? throw HostGroupException::errorWhileRetrievingJustCreated();
+        $this->assertNameDoesNotAlreadyExists($hostGroup, $request);
+        $this->assertNotNullIconsExist($request);
 
-        return $this->createResponse($hostGroup);
+        $modifiedHostGroud = $this->createModifiedHostGroup($hostGroup, $request);
+        $this->writeHostGroupRepository->update($modifiedHostGroud);
+
+        return new NoContentResponse();
     }
 
     /**
-     * @param AddHostGroupRequest $request
+     * @param UpdateHostGroupRequest $request
+     * @param int $hostGroupId
+     *
+     * @throws \Throwable
+     * @throws HostGroupException
+     *
+     * @return NoContentResponse|NotFoundResponse
+     */
+    private function updateHostGroupAsContact(
+        int $hostGroupId,
+        UpdateHostGroupRequest $request
+    ): NoContentResponse|NotFoundResponse {
+        $accessGroups = $this->readAccessGroupRepository->findByContact($this->contact);
+        $hostGroup = $this->readHostGroupRepository->findOneByAccessGroups($hostGroupId, $accessGroups);
+        if (null === $hostGroup) {
+            return new NotFoundResponse('Host group');
+        }
+
+        $this->assertNameDoesNotAlreadyExists($hostGroup, $request);
+        $this->assertNotNullIconsExist($request);
+
+        $modifiedHostGroud = $this->createModifiedHostGroup($hostGroup, $request);
+        $this->writeHostGroupRepository->update($modifiedHostGroud);
+
+        return new NoContentResponse();
+    }
+
+    /**
+     * @param UpdateHostGroupRequest $request
+     * @param HostGroup $hostGroup
      *
      * @throws HostGroupException
      * @throws \Throwable
      */
-    private function assertNameDoesNotAlreadyExists(AddHostGroupRequest $request): void
+    private function assertNameDoesNotAlreadyExists(HostGroup $hostGroup, UpdateHostGroupRequest $request): void
     {
-        if ($this->readHostGroupRepository->nameAlreadyExists($request->name)) {
+        if (
+            $hostGroup->getName() !== $request->name
+            && $this->readHostGroupRepository->nameAlreadyExists($request->name)
+        ) {
             $this->error('Host group name already exists', ['name' => $request->name]);
 
             throw HostGroupException::nameAlreadyExists($request->name);
@@ -184,12 +191,12 @@ final class AddHostGroup
     }
 
     /**
-     * @param AddHostGroupRequest $request
+     * @param UpdateHostGroupRequest $request
      *
      * @throws HostGroupException
      * @throws \Throwable
      */
-    private function assertNotNullIconsExist(AddHostGroupRequest $request): void
+    private function assertNotNullIconsExist(UpdateHostGroupRequest $request): void
     {
         if (
             null !== $request->iconId
@@ -214,16 +221,18 @@ final class AddHostGroup
     }
 
     /**
-     * @param AddHostGroupRequest $request
+     * @param HostGroup $hostGroup
+     * @param UpdateHostGroupRequest $request
      *
-     * @throws \Core\Domain\Exception\InvalidGeoCoordException
-     * @throws \Assert\AssertionFailedException
+     * @throws AssertionFailedException
+     * @throws InvalidGeoCoordException
      *
-     * @return NewHostGroup
+     * @return HostGroup
      */
-    private function createNewHostGroup(AddHostGroupRequest $request): NewHostGroup
+    private function createModifiedHostGroup(HostGroup $hostGroup, UpdateHostGroupRequest $request): HostGroup
     {
-        return new NewHostGroup(
+        return new HostGroup(
+            $hostGroup->getId(),
             $request->name,
             $request->alias,
             $request->notes,
@@ -243,30 +252,5 @@ final class AddHostGroup
             $request->comment,
             $request->isActivated,
         );
-    }
-
-    /**
-     * @param HostGroup $hostGroup
-     *
-     * @return CreatedResponse<AddHostGroupResponse>
-     */
-    private function createResponse(HostGroup $hostGroup): CreatedResponse
-    {
-        $response = new AddHostGroupResponse();
-
-        $response->id = $hostGroup->getId();
-        $response->name = $hostGroup->getName();
-        $response->alias = $hostGroup->getAlias();
-        $response->notes = $hostGroup->getNotes();
-        $response->notesUrl = $hostGroup->getNotesUrl();
-        $response->actionUrl = $hostGroup->getActionUrl();
-        $response->iconId = $hostGroup->getIconId();
-        $response->iconMapId = $hostGroup->getIconMapId();
-        $response->rrdRetention = $hostGroup->getRrdRetention();
-        $response->geoCoords = $hostGroup->getGeoCoords()?->__toString();
-        $response->comment = $hostGroup->getComment();
-        $response->isActivated = $hostGroup->isActivated();
-
-        return new CreatedResponse($response->id, $response);
     }
 }
