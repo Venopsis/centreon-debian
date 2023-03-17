@@ -96,7 +96,7 @@ it(
         expect($this->presenter->getResponseStatus())
             ->toBeInstanceOf(ErrorResponse::class)
             ->and($this->presenter->getResponseStatus()?->getMessage())
-            ->toBe(HostGroupException::errorWhileSearching()->getMessage());
+            ->toBe(HostGroupException::errorWhileRetrieving()->getMessage());
     }
 );
 

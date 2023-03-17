@@ -78,23 +78,15 @@ final class FindHostGroup
                 }
             } else {
                 $this->error(
-                    "User doesn't have sufficient rights to see host groups",
+                    "User doesn't have sufficient rights to see the host group",
                     ['user_id' => $this->contact->getId()]
                 );
                 $presenter->setResponseStatus(
                     new ForbiddenResponse(HostGroupException::accessNotAllowed()->getMessage())
                 );
             }
-        } catch (HostGroupException $ex) {
-            $presenter->setResponseStatus(
-                match ($ex->getCode()) {
-                    HostGroupException::CODE_CONFLICT => new ConflictResponse($ex),
-                    default => new ErrorResponse($ex),
-                }
-            );
-            $this->error($ex->getMessage(), ['trace' => $ex->getTraceAsString()]);
         } catch (\Throwable $ex) {
-            $presenter->setResponseStatus(new ErrorResponse(HostGroupException::errorWhileSearching()->getMessage()));
+            $presenter->setResponseStatus(new ErrorResponse(HostGroupException::errorWhileRetrieving()->getMessage()));
             $this->error($ex->getMessage(), ['trace' => $ex->getTraceAsString()]);
         }
     }
