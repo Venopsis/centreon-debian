@@ -26,7 +26,6 @@ namespace Core\HostGroup\Application\UseCase\FindHostGroup;
 use Centreon\Domain\Contact\Contact;
 use Centreon\Domain\Contact\Interfaces\ContactInterface;
 use Centreon\Domain\Log\LoggerTrait;
-use Core\Application\Common\UseCase\ConflictResponse;
 use Core\Application\Common\UseCase\ErrorResponse;
 use Core\Application\Common\UseCase\ForbiddenResponse;
 use Core\Application\Common\UseCase\NotFoundResponse;
@@ -58,31 +57,23 @@ final class FindHostGroup
         try {
             if ($this->contact->isAdmin()) {
                 $response = $this->findHostGroupAsAdmin($hostGroupId);
-
-                if ($response instanceof NotFoundResponse) {
-                    $presenter->setResponseStatus($response);
-                    $this->warning('Host group (%s) not found', ['id' => $hostGroupId]);
-                } else {
-                    $presenter->present($response);
-                    $this->info('Find host group', ['id' => $hostGroupId]);
-                }
             } elseif ($this->contactCanExecuteThisUseCase()) {
                 $response = $this->findHostGroupAsContact($hostGroupId);
-
-                if ($response instanceof NotFoundResponse) {
-                    $presenter->setResponseStatus($response);
-                    $this->warning('Host group (%s) not found', ['id' => $hostGroupId]);
-                } else {
-                    $presenter->present($response);
-                    $this->info('Find host group', ['id' => $hostGroupId]);
-                }
             } else {
+                $response = new ForbiddenResponse(HostGroupException::accessNotAllowed()->getMessage());
+            }
+
+            if ($response instanceof FindHostGroupResponse) {
+                $presenter->present($response);
+                $this->info('Find host group', ['id' => $hostGroupId]);
+            } elseif ($response instanceof NotFoundResponse) {
+                $presenter->setResponseStatus($response);
+                $this->warning('Host group (%s) not found', ['id' => $hostGroupId]);
+            } else {
+                $presenter->setResponseStatus($response);
                 $this->error(
                     "User doesn't have sufficient rights to see the host group",
                     ['user_id' => $this->contact->getId()]
-                );
-                $presenter->setResponseStatus(
-                    new ForbiddenResponse(HostGroupException::accessNotAllowed()->getMessage())
                 );
             }
         } catch (\Throwable $ex) {
