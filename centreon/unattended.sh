@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 ### Define all supported constants
 OPTIONS=":t:v:r:l:"
